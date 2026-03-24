@@ -1,0 +1,331 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>语音搜索 - 五金库存</title>
+  <style>
+    body { font-family: sans-serif; padding: 18px; }
+    #controls { margin-bottom: 12px; }
+    #voiceBtn { padding:8px 12px; }
+    #textInput { width: 320px; padding:6px; font-size:14px; }
+    #results { margin-top:12px; }
+    .row { padding:8px; border-bottom:1px solid #eee; }
+    .idBtn { background:#0b79ff; color:#fff; border:none; padding:4px 8px; cursor:pointer; border-radius:4px; }
+    .score { font-size:12px; color:#888; margin-left:8px; }
+  </style>
+</head>
+<body>
+  <h2>语音/文本 搜索（五金）</h2>
+
+  <!-- 新增：AI 模糊理解搜索框 -->
+  <h3>（新功能）语义模糊搜索（比如：工地上爬上爬下的架子）</h3>
+
+  <div id="aiBox" style="margin-bottom:15px; padding:10px; border:1px solid #ccc;">
+    <input id="aiFuzzyInput" placeholder="输入模糊描述，例如：工地上爬上爬下的那个架子" 
+           style="width:320px; padding:6px; font-size:14px;" />
+    <button id="aiVoiceBtn">🎤 语音描述</button>
+    <button onclick="onSemanticSearch()">AI 识别工具</button>
+    <div id="aiFuzzyResults" style="margin-top:10px;"></div>
+  </div>
+
+  <div id="controls">
+    <button id="voiceBtn">🎤 语音识别（中文）</button>
+    <input id="textInput" placeholder="或者手动输入关键词，例如：深沟球轴承" />
+    <button id="searchBtn">搜索</button>
+  </div>
+
+  <div id="results"></div>
+
+  <!-- libs：使用 CDN（可改为本地 libs/xlsx.full.min.js, libs/fuse.min.js） -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
+
+  <!-- data.js （加载 excel 并做匹配） -->
+  <script src="./data.js"></script>
+
+  <script>
+    // ========== 普通搜索函数 ==========
+    async function doSearch(text) {
+      const resultsDiv = document.getElementById('results');
+      if (!text || text.trim() === '') {
+        resultsDiv.innerHTML = '<div>请输入搜索内容</div>';
+        return;
+      }
+      
+      resultsDiv.innerHTML = '<div>正在搜索，请稍等...</div>';
+      
+      try {
+        // 首先尝试调用后端普通搜索接口
+        const response = await fetch(`/api/search?keyword=${encodeURIComponent(text)}`);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP错误: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data && Array.isArray(data) && data.length > 0) {
+          // 转换数据格式以适配现有的renderResults函数
+          const formattedData = data.map((item, index) => {
+            // 假设后端返回的是字符串数组 ["羊角锤-92", ...]
+            const [name, stock] = item.split('-');
+            return {
+              item: {
+                '名称': name || item,
+                'ID': index + 1, // 临时ID
+                '库存': stock || '未知',
+                '备注': '来自普通搜索'
+              },
+              score: 1.0 - (index * 0.01) // 模拟相似度分数
+            };
+          });
+          
+          renderResults(formattedData);
+        } else {
+          // 如果没有数据，尝试使用data.js的搜索作为备用
+          if (typeof searchFromExcel !== 'undefined') {
+            const res = await searchFromExcel(text, 20);
+            if (res && res.length > 0) {
+              renderResults(res);
+            } else {
+              resultsDiv.innerHTML = '<div>未找到匹配项</div>';
+            }
+          } else {
+            resultsDiv.innerHTML = '<div>未找到匹配项</div>';
+          }
+        }
+      } catch (error) {
+        console.error('搜索失败:', error);
+        
+        // 备用方案：使用data.js搜索
+        if (typeof searchFromExcel !== 'undefined') {
+          try {
+            const res = await searchFromExcel(text, 20);
+            if (res && res.length > 0) {
+              renderResults(res);
+            } else {
+              resultsDiv.innerHTML = '<div>搜索服务暂时不可用</div>';
+            }
+          } catch (backupError) {
+            console.error('备用搜索也失败:', backupError);
+            resultsDiv.innerHTML = '<div>搜索服务暂时不可用，请稍后重试</div>';
+          }
+        } else {
+          resultsDiv.innerHTML = '<div>搜索服务暂时不可用，请稍后重试</div>';
+        }
+      }
+    }
+
+    // ========== AI语义搜索函数 ==========
+    async function onSemanticSearch() {
+      const text = document.getElementById('aiFuzzyInput').value.trim();
+      const box = document.getElementById('aiFuzzyResults');
+      box.innerHTML = '';
+
+      if (!text) {
+        box.innerHTML = "<div>请输入模糊描述。</div>";
+        return;
+      }
+
+      box.innerHTML = '<div>AI识别中，请稍候...</div>';
+
+      try {
+        // 调用后端AI语义搜索接口
+        const resp = await fetch('/api/semantic-search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: text })
+        });
+
+        if (!resp.ok) {
+          throw new Error(`HTTP错误: ${resp.status}`);
+        }
+
+        const data = await resp.json();
+
+        if (!data.ok || !data.candidates || data.candidates.length === 0) {
+          box.innerHTML = "<div>未识别出工具，请尝试换种描述。</div>";
+          return;
+        }
+
+        // 显示候选工具
+        box.innerHTML = '<div><strong>AI识别结果：</strong></div>';
+        data.candidates.forEach(name => {
+          const btn = document.createElement('button');
+          btn.innerText = name;
+          btn.style.margin = "5px";
+          btn.style.padding = "6px 10px";
+          btn.style.background = "#0b79ff";
+          btn.style.color = "#fff";
+          btn.style.border = "none";
+          btn.style.borderRadius = "4px";
+          btn.style.cursor = "pointer";
+
+          btn.onclick = () => {
+            // 自动填入原有的textInput
+            document.getElementById('textInput').value = name;
+            // 触发搜索
+            doSearch(name);
+          };
+
+          box.appendChild(btn);
+        });
+      } catch (error) {
+        console.error('AI搜索失败:', error);
+        box.innerHTML = "<div>AI搜索失败，请检查网络连接或稍后重试。</div>";
+      }
+    }
+
+    // ========== 渲染结果函数 ==========
+    function renderResults(list) {
+      const resultsDiv = document.getElementById('results');
+      
+      if (!list || list.length === 0) {
+        resultsDiv.innerHTML = '<div>未找到匹配项</div>';
+        return;
+      }
+      
+      resultsDiv.innerHTML = '';
+      list.forEach((r, idx) => {
+        const item = r.item || r;
+        const score = (r.score !== undefined && r.score !== null) ? (r.score.toFixed(3)) : '';
+        const row = document.createElement('div');
+        row.className = 'row';
+        
+        // 显示 ID 的按钮，点击后跳转到 3D 页面并触发定位
+        const itemId = item.ID || item.Id || item.id || (idx + 1);
+        const itemName = item.名称 || item.Name || item.name || '未知名称';
+        
+        row.innerHTML = `
+          <div><b>${idx+1}. 名称：</b>${itemName} <span class="score">相似度:${score}</span></div>
+          <div><b>ID：</b> 
+            <button class="idBtn" data-id="${itemId}">${itemId}</button>
+          </div>
+          <div><small>其它列：${Object.keys(item)
+            .filter(k => !['ID','Id','id','名称','Name','name'].includes(k))
+            .map(k => k + ':' + item[k])
+            .join('  |  ')}</small></div>
+        `;
+        resultsDiv.appendChild(row);
+      });
+
+      // 绑定 ID 点击事件
+      Array.from(document.getElementsByClassName('idBtn')).forEach(btn => {
+        btn.onclick = (ev) => {
+          const id = ev.currentTarget.dataset.id;
+          // 打开 3D 页，携带 id 参数（在新页打开）
+          window.open(`./3d.html?id=${encodeURIComponent(id)}`, '_blank');
+        };
+      });
+    }
+
+    // ========== 语音识别和UI初始化 ==========
+    const voiceBtn = document.getElementById('voiceBtn');
+    const textInput = document.getElementById('textInput');
+    const resultsDiv = document.getElementById('results');
+    const searchBtn = document.getElementById('searchBtn');
+    const aiVoiceBtn = document.getElementById('aiVoiceBtn');
+    const aiInput = document.getElementById('aiFuzzyInput');
+
+    let recognition = null;
+    
+    // 初始化语音识别
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.lang = 'zh-CN';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      
+      // 主搜索框语音识别
+      voiceBtn.onclick = () => {
+        if (!recognition) return alert('浏览器不支持语音识别，请用 Chrome/Edge');
+        recognition.start();
+        voiceBtn.textContent = '录音中...';
+      };
+
+      recognition.onresult = (e) => {
+        const text = e.results[0][0].transcript.trim();
+        textInput.value = text;
+        voiceBtn.textContent = '🎤 语音识别（中文）';
+        doSearch(text);
+      };
+      
+      recognition.onerror = (ev) => {
+        console.error(ev);
+        voiceBtn.textContent = '🎤 语音识别（中文）';
+        aiVoiceBtn.textContent = '🎤 语音描述';
+      };
+
+      // AI搜索框语音识别
+      if (aiVoiceBtn) {
+        aiVoiceBtn.onclick = () => {
+          if (!recognition) return alert('浏览器不支持语音识别，请用 Chrome/Edge');
+          recognition.start();
+          aiVoiceBtn.textContent = '录音中...';
+        };
+        
+        // 单独为AI搜索框处理结果
+        recognition.addEventListener('result', (e) => {
+          const text = e.results[0][0].transcript.trim();
+          
+          // 判断是哪个语音触发的
+          if (aiVoiceBtn.textContent.includes('录音中')) {
+            aiInput.value = text;
+            aiVoiceBtn.textContent = '🎤 语音描述';
+            // 自动调用语义搜索
+            onSemanticSearch();
+          }
+        });
+      }
+    } else {
+      voiceBtn.disabled = true;
+      voiceBtn.title = "浏览器不支持 Web Speech API，请使用 Chrome/Edge";
+      if (aiVoiceBtn) {
+        aiVoiceBtn.disabled = true;
+        aiVoiceBtn.title = "浏览器不支持 Web Speech API，请使用 Chrome/Edge";
+      }
+    }
+
+    // 搜索按钮事件
+    searchBtn.onclick = () => {
+      const t = textInput.value.trim();
+      if (!t) return alert('请输入关键词或使用语音识别');
+      doSearch(t);
+    };
+    
+    // 输入框回车键搜索
+    textInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        const t = textInput.value.trim();
+        if (!t) return alert('请输入关键词或使用语音识别');
+        doSearch(t);
+      }
+    });
+    
+    // AI输入框回车键搜索
+    aiInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        onSemanticSearch();
+      }
+    });
+    
+    // 页面加载时初始化
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('语音搜索页面已加载');
+      // 检查后端接口是否可用
+      fetch('/api/search?keyword=测试')
+        .then(res => {
+          if (res.ok) {
+            console.log('后端搜索接口连接正常');
+          } else {
+            console.warn('后端搜索接口可能有问题:', res.status);
+          }
+        })
+        .catch(err => {
+          console.warn('无法连接到后端搜索接口:', err);
+        });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,360 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>仓库三维可视化（单搜索 + 红色强提示）</title>
+  <style>
+    body { margin:0; overflow:hidden; font-family: sans-serif; }
+    #ui { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.9); padding: 10px; border-radius: 6px; z-index:10; }
+    #canvas { width:100vw; height:100vh; display:block; }
+    .info { margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="resetView">重置视角</button>
+    <div class="info" id="selectedInfo">未选择物品</div>
+
+    <!-- === ★ 修改点：改成单搜索框 === -->
+    <div style="margin-top:10px;">
+      <input id="searchID" placeholder="输入物品 ID" style="width:120px;">
+      <button onclick="searchItem()">搜索</button>
+    </div>
+
+    <div id="editBox" style="display:none; margin-top:10px;">
+      新位置：<input id="newLocation" placeholder="3货架2层5格">
+      <button id="saveLocation">保存</button>
+    </div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client/dist/socket.io.min.js"></script>
+
+<script>
+/* ===========================================================
+   初始化
+=========================================================== */
+const API_BASE = 'http://localhost:3000';
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf0f0f0);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(20, 15, 30);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(6, 3, 6);
+controls.update();
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+dir.position.set(10,20,10);
+scene.add(dir);
+
+/* 参数 */
+const shelfSpacing = 2;
+const layerSpacing = 1.2;
+const binSpacing = 1;
+
+/* 材质 */
+const meshes = {};
+const normalMat = new THREE.MeshStandardMaterial({ metalness:0.2, roughness:0.7 });
+
+/* ========== 解析位置 ========== */
+function parseLocation(loc) {
+  const m = String(loc).match(/(\d+)\s*货架\s*(\d+)\s*层\s*(\d+)\s*格/);
+  return m ? { shelf:+m[1], layer:+m[2], bin:+m[3] } : null;
+}
+
+function toPosition(p) {
+  return new THREE.Vector3(
+    p.shelf * shelfSpacing,
+    p.layer * layerSpacing,
+    p.bin * binSpacing
+  );
+}
+
+/* ========== 加载物品 ========== */
+// === ★ 修改 loadItems 以返回完成信号（放在你的三维页面 script 中） ===
+async function loadItems() {
+  const resp = await fetch(API_BASE + '/api/items');
+  const list = await resp.json();
+
+  // 清理已有（可选）
+  // Object.values(meshes).forEach(m => scene.remove(m));
+
+  for (const item of list) {
+    addItemToScene(item); // 你已有的函数
+  }
+
+  // 等下一帧以确保 three.js 把对象处理好
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  // 返回已加载的列表（或 true）以通知外部
+  return list;
+}
+
+
+function addItemToScene(item) {
+  const geom = new THREE.BoxGeometry(1.0, 1.0, 1.0);
+  const mat = normalMat.clone();
+  const mesh = new THREE.Mesh(geom, mat);
+
+  mesh.userData = { id:item.id, item };
+
+  const p = parseLocation(item.location);
+  if (p) mesh.position.copy(toPosition(p));
+
+  scene.add(mesh);
+  meshes[item.id] = mesh;
+}
+
+loadItems();
+
+/* ========== 点击选择（普通选中） ========== */
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let selectedId = null;
+
+const selectedInfo = document.getElementById('selectedInfo');
+const editBox = document.getElementById('editBox');
+const newLocationInput = document.getElementById('newLocation');
+
+function selectItem(id) {
+  selectedId = id;
+  const mesh = meshes[id];
+
+  mesh.material = new THREE.MeshStandardMaterial({ emissive:0xff8800, emissiveIntensity:2 });
+
+  const info = mesh.userData.item;
+  selectedInfo.innerText = `已选择：${info.name}（ID:${info.id}） 位置:${info.location}`;
+  editBox.style.display = 'block';
+  newLocationInput.value = info.location;
+
+  controls.target.copy(mesh.position);
+}
+
+/* ========= 保存位置 ========= */
+document.getElementById('saveLocation').onclick = async () => {
+  if (!selectedId) return;
+  await fetch(API_BASE + '/api/update', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ id:selectedId, newLocation:newLocationInput.value })
+  });
+};
+
+/* ========= socket 实时更新 ========= */
+const socket = io(API_BASE);
+socket.on('itemUpdated', ({ id, newLocation }) => {
+  const mesh = meshes[id];
+  mesh.userData.item.location = newLocation;
+  const p = parseLocation(newLocation);
+  if (p) mesh.position.copy(toPosition(p));
+});
+
+/* ===========================================================
+   === ★ 修改点：单搜索框 + 亮红色 + 指示线 + 点击正确后消失 ===
+=========================================================== */
+let highlightTarget = null;   // 当前高亮的物体
+let guideLine = null;         // 指示线
+
+function clearHighlight() {
+  if (highlightTarget) {
+    highlightTarget.material = normalMat.clone();
+    highlightTarget = null;
+  }
+  if (guideLine) {
+    scene.remove(guideLine);
+    guideLine.geometry.dispose();
+    guideLine = null;
+  }
+}
+
+/* === ★ 搜索功能 === */
+function searchItem() {
+  const value = document.getElementById("searchID").value.trim();
+  if (!value) return alert("请输入 ID");
+
+  const id = Number(value);
+  const mesh = meshes[id];
+  if (!mesh) return alert("未找到此 ID");
+
+  clearHighlight();
+  highlightTarget = mesh;
+
+  // === ★ 改成亮红色高亮 ===
+  mesh.material = new THREE.MeshStandardMaterial({
+    emissive: 0xff0000,
+    emissiveIntensity: 3
+  });
+
+  // === ★ 创建红色指示线 ===
+  const start = new THREE.Vector3(mesh.position.x, mesh.position.y + 5, mesh.position.z);
+  const end = mesh.position.clone();
+  const points = [start, end];
+  const geom = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+
+  guideLine = new THREE.Line(geom, mat);
+  scene.add(guideLine);
+
+  controls.target.copy(mesh.position);
+
+  selectedInfo.innerText = `搜索结果：ID:${id}`;
+  smoothCameraMove(mesh.position);
+}
+
+/* === ★ 点击正确物体后清除高亮 === */
+window.addEventListener('pointerdown', event => {
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const hits = raycaster.intersectObjects(Object.values(meshes));
+  if (hits.length > 0) {
+    const clickedID = hits[0].object.userData.id;
+
+    // === ★ 点击的是高亮目标 → 清除所有效果
+    if (highlightTarget && clickedID === highlightTarget.userData.id) {
+      clearHighlight();
+      return;
+    }
+
+    // 其他点击保持以前逻辑
+    selectItem(clickedID);
+  }
+});
+
+
+/* ===========================================================
+   ★ 平滑移动摄像机（不依赖第三方）
+=========================================================== */
+function smoothCameraMove(targetPos) {
+  const duration = 800; // 动画时间（毫秒）
+  const start = performance.now();
+
+  const camStart = camera.position.clone();
+  const tgtStart = controls.target.clone();
+
+  const camEnd   = targetPos.clone().add(new THREE.Vector3(4, 3, 6)); // 你想要的视角偏移
+  const tgtEnd   = targetPos.clone();
+
+  function animateMove(now) {
+    const t = Math.min((now - start) / duration, 1);
+    const ease = t < 0.5 ? 2*t*t : -1 + (4 - 2*t)*t; // 缓动函数
+
+    camera.position.lerpVectors(camStart, camEnd, ease);
+    controls.target.lerpVectors(tgtStart, tgtEnd, ease);
+
+    if (t < 1) requestAnimationFrame(animateMove);
+  }
+
+  requestAnimationFrame(animateMove);
+}
+
+/* ===========================================================
+   动画
+=========================================================== */
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+
+/* Resize */
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* 重置视角 */
+document.getElementById("resetView").onclick = () => {
+  camera.position.set(20, 15, 30);
+  controls.target.set(6,3,6);
+  controls.update();
+};
+// === ★ 自动从 URL 读取 id 并定位（放在你的三维页面 script 底部） ===
+function getUrlIdParam() {
+  const p = new URLSearchParams(window.location.search);
+  return p.get('id');
+}
+
+async function tryAutoLocateFromUrl() {
+  const id = getUrlIdParam();
+  if (!id) return;
+
+  // 等待 meshes 加载完成：调用 loadItems() 并等待其完成（如果已经调用也无害）
+  try {
+    if (typeof loadItems === 'function') {
+      await loadItems();
+    }
+  } catch (e) {
+    console.warn('loadItems() 抛错（可忽略如果已在别处加载）', e);
+  }
+
+  // 确认 meshes 已准备好（最多等待几次）
+  const targetId = id;
+  let attempts = 0;
+  const maxAttempts = 20; // 最多等待 20 * 100ms = 2s
+  while ((!meshes[targetId]) && attempts < maxAttempts) {
+    // 等 100ms 再检查
+    await new Promise(r => setTimeout(r, 100));
+    attempts++;
+  }
+
+  if (!meshes[targetId]) {
+    console.warn('未能在 meshes 中找到 id=', targetId);
+    return;
+  }
+
+  // 将 id 填入搜索输入框（如果存在）
+  const searchInput = document.getElementById('searchID') || document.getElementById('searchInput');
+  if (searchInput) searchInput.value = targetId;
+
+  // 优先调用你已有的搜索函数，以保持一切业务逻辑一致
+  if (typeof searchItem === 'function') {
+    try {
+      searchItem(); // 你原来的 searchItem() 应从 DOM 读取 ID 并高亮
+      return;
+    } catch(e) { console.warn('调用 searchItem() 时出错，尝试其它方式', e); }
+  }
+
+  if (typeof searchByID === 'function') {
+    try {
+      searchByID(targetId);
+      return;
+    } catch(e) { console.warn('调用 searchByID() 时出错', e); }
+  }
+
+  // 最后保底方案：直接高亮 meshes[targetId] 并聚焦
+  const mesh = meshes[targetId];
+  if (mesh) {
+    mesh.material = new THREE.MeshStandardMaterial({ emissive:0xff0000, emissiveIntensity:3 });
+    controls.target.copy(mesh.position);
+    // 可视化增强：添加指示线（简单）
+    const start = new THREE.Vector3(mesh.position.x, mesh.position.y + 5, mesh.position.z);
+    const geom = new THREE.BufferGeometry().setFromPoints([start, mesh.position.clone()]);
+    const mat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+    const line = new THREE.Line(geom, mat);
+    scene.add(line);
+    // 可在需要时保存 line 引用以备清理
+  }
+}
+
+// 在页面加载完成后触发
+window.addEventListener('DOMContentLoaded', () => {
+  tryAutoLocateFromUrl();
+});
+
+</script>
+</body>
+</html>

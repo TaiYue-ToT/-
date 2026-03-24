@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>销售记录</title>
+  <style>
+    body { display: flex; font-family: sans-serif; padding: 20px; }
+    #left { width: 350px; }
+    #right { flex: 1; padding-left: 40px; border-left: 2px solid #ddd; }
+    input, select, button { padding: 8px; margin: 5px 0; width: 200px; }
+  </style>
+</head>
+<body>
+
+<div id="left">
+  <h2>选择日期</h2>
+  <input type="date" id="date">
+
+  <h2>操作员</h2>
+  <select id="operator">
+    <option>王明</option>
+    <option>李丽</option>
+  </select>
+
+  <h2>搜索商品（ID）</h2>
+  <input id="searchId" placeholder="输入商品ID">
+  <button id="btnSearch">搜索</button>
+
+  <h2>记录</h2>
+  商品名称：<div id="itemName"></div>
+  单价：<div id="itemPrice"></div>
+  库存：<div id="itemStock"></div>
+
+  数量：<input id="qty" type="number" value="1" min="1">
+
+  <br><br>
+  <button id="btnConfirm">确认销售</button>
+</div>
+
+<div id="right">
+  <h2>今日销售记录</h2>
+  <div id="log"></div>
+</div>
+
+<script src="sales.js"></script>
+</body>
+</html>
